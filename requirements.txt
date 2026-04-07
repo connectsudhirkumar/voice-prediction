@@ -8,4 +8,4 @@ seaborn
 noisereduce
 scikit-learn
 scipy
-tensorflow-cpu
+tensorflow-cpu==2.15.0
