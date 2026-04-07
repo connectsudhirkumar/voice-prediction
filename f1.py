@@ -9,8 +9,10 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 import tempfile
 import seaborn as sns
+import noisereduce as nr
 
 from extract import get_voice_features
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
@@ -39,6 +41,14 @@ def safe_load_audio(path):
     except:
         return None, None
 
+# =========================
+# NOISE REDUCTION
+# =========================
+def clean_audio(y, sr):
+    try:
+        return nr.reduce_noise(y=y, sr=sr)
+    except:
+        return y
 
 # =========================
 # DATASET
@@ -52,6 +62,8 @@ def create_dataset(folder="audio"):
             y, sr = safe_load_audio(path)
             if y is None:
                 continue
+
+            y = clean_audio(y, sr)
 
             try:
                 features = get_voice_features(path)
@@ -68,7 +80,6 @@ def create_dataset(folder="audio"):
             data.append(features)
 
     return pd.DataFrame(data)
-
 
 # =========================
 # TRAIN ML MODELS
@@ -97,7 +108,6 @@ def train_ml_models(X_train, X_test, y_train, y_test):
     joblib.dump(best_name, "best_model_name.pkl")
 
     return best_model, best_name
-
 
 # =========================
 # TRAIN ALL
@@ -143,7 +153,7 @@ def train_all(progress):
 
     st.success(f"🏆 Best Model: {model_name}")
 
-    # DL TRAIN
+    # DL Model
     progress.progress(70, text="🧠 Training DL model...")
     X_dl, y_dl = [], []
 
@@ -152,6 +162,8 @@ def train_all(progress):
         audio, sr = safe_load_audio(path)
         if audio is None:
             continue
+
+        audio = clean_audio(audio, sr)
 
         spec = librosa.feature.melspectrogram(y=audio, sr=sr)
         spec = librosa.power_to_db(spec)
@@ -166,21 +178,31 @@ def train_all(progress):
 
         dl_model = tf.keras.Sequential([
             tf.keras.layers.Conv2D(32,(3,3),activation='relu',input_shape=(128,128,1)),
+            tf.keras.layers.BatchNormalization(),
             tf.keras.layers.MaxPooling2D(),
+
+            tf.keras.layers.Conv2D(64,(3,3),activation='relu'),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.MaxPooling2D(),
+
+            tf.keras.layers.Conv2D(128,(3,3),activation='relu'),
+            tf.keras.layers.MaxPooling2D(),
+
             tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(64,activation='relu'),
+            tf.keras.layers.Dense(128,activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+
             tf.keras.layers.Dense(1,activation='sigmoid')
         ])
 
         dl_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
 
-        history = dl_model.fit(X_dl, y_dl, epochs=5, validation_split=0.2, verbose=0)
+        history = dl_model.fit(X_dl, y_dl, epochs=10, validation_split=0.2, verbose=0)
 
         dl_model.save("cnn.h5")
         joblib.dump(history.history, "history.pkl")
 
     progress.progress(100, text="✅ Training Complete")
-
 
 # =========================
 # TRAIN BUTTON
@@ -190,7 +212,6 @@ st.header("🚀 Training")
 if st.button("Train Model"):
     progress = st.progress(0)
     train_all(progress)
-
 
 # =========================
 # LOAD MODELS
@@ -205,17 +226,24 @@ scaler = joblib.load("scaler.pkl")
 cols = joblib.load("cols.pkl")
 dl_model = tf.keras.models.load_model("cnn.h5")
 
-
 # =========================
-# PREDICTION WITH PROGRESS
+# INPUT
 # =========================
 st.header("🎤 Upload Audio")
 
-file = st.file_uploader("Upload WAV")
+file = st.file_uploader("Upload WAV File", type=["wav"])
 
+audio_bytes = None
 if file:
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        f.write(file.read())
+    audio_bytes = file.read()
+
+# =========================
+# PREDICTION
+# =========================
+if audio_bytes:
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(audio_bytes)
         path = f.name
 
     progress = st.progress(0)
@@ -226,6 +254,8 @@ if file:
     if y is None:
         st.error("Invalid audio")
         st.stop()
+
+    y = clean_audio(y, sr)
 
     progress.progress(30, text="🔍 Extracting features...")
     features = get_voice_features(path)
@@ -246,30 +276,54 @@ if file:
 
     progress.progress(100, text="✅ Done")
 
-    # RESULT
-    st.subheader("🧾 Result")
-    label = "Parkinson ❌" if final > 0.5 else "Healthy ✅"
+    # ===== RESULT UI =====
+    st.subheader("🧾 Prediction Result")
+
+    label = "Healthy ✅" if final <= 0.5 else "Parkinson ❌"
 
     st.success(f"Prediction: {label}")
     st.info(f"🤖 Model Used: {model_name}")
 
     col1, col2 = st.columns(2)
-    col1.metric("ML Score", f"{ml_prob*100:.2f}%")
-    col2.metric("DL Score", f"{dl_prob*100:.2f}%")
 
-    # VISUALS
+    with col1:
+        st.metric("🤖 ML Confidence", f"{ml_prob*100:.2f}%")
+
+    with col2:
+        st.metric("🧠 DL Confidence", f"{dl_prob*100:.2f}%")
+
+    combined_accuracy = ((ml_prob + dl_prob) / 2) * 100
+
+    st.markdown("---")
+    st.subheader("🎯 Overall Accuracy")
+    st.caption("Combined confidence score using ML + Deep Learning")
+    st.metric("Hybrid Accuracy", f"{combined_accuracy:.2f}%")
+
+    # ===== VISUALS =====
+    st.markdown("---")
+    st.subheader("📊 Voice Analysis")
+
     colA, colB = st.columns(2)
 
     with colA:
-        fig, ax = plt.subplots(figsize=(4,2.5))
+        st.subheader("🎵 Audio Waveform")
+        st.caption("Represents amplitude of voice signal over time")
+
+        fig, ax = plt.subplots()
         librosa.display.waveshow(y, sr=sr, ax=ax)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Amplitude")
         st.pyplot(fig)
 
     with colB:
-        fig, ax = plt.subplots(figsize=(4,2.5))
-        librosa.display.specshow(spec[0,:,:,0], sr=sr, ax=ax)
-        st.pyplot(fig)
+        st.subheader("🌈 Spectrogram")
+        st.caption("Shows frequency distribution of voice over time")
 
+        fig, ax = plt.subplots()
+        librosa.display.specshow(spec[0,:,:,0], sr=sr, ax=ax)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Frequency")
+        st.pyplot(fig)
 
 # =========================
 # CONFUSION MATRIX
@@ -277,12 +331,14 @@ if file:
 if os.path.exists("cm.pkl"):
     cm = joblib.load("cm.pkl")
 
-    col1, col2, col3 = st.columns([1,2,1])
-    with col2:
-        fig, ax = plt.subplots(figsize=(3,2))
-        sns.heatmap(cm, annot=True, fmt='d', annot_kws={"size":8}, ax=ax)
-        st.pyplot(fig, use_container_width=False)
+    st.subheader("🔲 Confusion Matrix")
+    st.caption("Shows correct vs incorrect predictions")
 
+    fig, ax = plt.subplots()
+    sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", ax=ax)
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
+    st.pyplot(fig)
 
 # =========================
 # ROC CURVE
@@ -290,12 +346,15 @@ if os.path.exists("cm.pkl"):
 if os.path.exists("roc.pkl"):
     fpr, tpr, roc_auc = joblib.load("roc.pkl")
 
-    st.subheader("ROC Curve")
+    st.subheader("📈 ROC Curve")
+    st.caption("Model performance in distinguishing classes")
+
     fig, ax = plt.subplots()
     ax.plot(fpr, tpr, label=f"AUC={roc_auc:.2f}")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
     ax.legend()
     st.pyplot(fig)
-
 
 # =========================
 # FEATURE IMPORTANCE
@@ -303,11 +362,14 @@ if os.path.exists("roc.pkl"):
 if os.path.exists("feat_imp.pkl"):
     imp = joblib.load("feat_imp.pkl")
 
-    st.subheader("Feature Importance")
-    fig, ax = plt.subplots(figsize=(6,3))
-    ax.bar(range(len(imp)), imp)
-    st.pyplot(fig)
+    st.subheader("📊 Feature Importance")
+    st.caption("Shows which features influence prediction most")
 
+    fig, ax = plt.subplots()
+    ax.bar(range(len(imp)), imp)
+    ax.set_xlabel("Feature Index")
+    ax.set_ylabel("Importance Score")
+    st.pyplot(fig)
 
 # =========================
 # DL GRAPHS
@@ -315,16 +377,26 @@ if os.path.exists("feat_imp.pkl"):
 if os.path.exists("history.pkl"):
     hist = joblib.load("history.pkl")
 
+    st.subheader("🧠 DL Training Performance")
+
     col1, col2 = st.columns(2)
 
     with col1:
+        st.caption("Training vs Validation Loss")
         fig, ax = plt.subplots()
-        ax.plot(hist['loss'])
-        ax.plot(hist['val_loss'])
+        ax.plot(hist['loss'], label="Train Loss")
+        ax.plot(hist['val_loss'], label="Val Loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.legend()
         st.pyplot(fig)
 
     with col2:
+        st.caption("Training vs Validation Accuracy")
         fig, ax = plt.subplots()
-        ax.plot(hist['accuracy'])
-        ax.plot(hist['val_accuracy'])
+        ax.plot(hist['accuracy'], label="Train Accuracy")
+        ax.plot(hist['val_accuracy'], label="Val Accuracy")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Accuracy")
+        ax.legend()
         st.pyplot(fig)
