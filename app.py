@@ -183,11 +183,11 @@ cols = joblib.load("cols.pkl")
 
 
 # =========================
-# INPUT
+# INPUT (UPLOAD ONLY)
 # =========================
-st.header("🎤 Audio Input")
+st.header("🎤 Upload Audio")
 
-file = st.file_uploader("Upload WAV File")
+file = st.file_uploader("Upload WAV File", type=["wav"])
 
 audio_bytes = None
 if file:
@@ -229,8 +229,7 @@ if audio_bytes:
     st.success(f"Prediction: {label}")
     st.info(f"🤖 Model Used: {model_name}")
 
-    col1, col2 = st.columns(2)
-    col1.metric("ML Score", f"{ml_prob*100:.2f}%")
+    st.metric("ML Score", f"{ml_prob*100:.2f}%")
 
     colA, colB = st.columns(2)
 
@@ -246,3 +245,39 @@ if audio_bytes:
         fig, ax = plt.subplots()
         librosa.display.specshow(spec, sr=sr, ax=ax)
         st.pyplot(fig)
+
+
+# =========================
+# CONFUSION MATRIX
+# =========================
+if os.path.exists("cm.pkl"):
+    cm = joblib.load("cm.pkl")
+
+    fig, ax = plt.subplots()
+    sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", ax=ax)
+    st.pyplot(fig)
+
+
+# =========================
+# ROC CURVE
+# =========================
+if os.path.exists("roc.pkl"):
+    fpr, tpr, roc_auc = joblib.load("roc.pkl")
+
+    st.subheader("ROC Curve")
+    fig, ax = plt.subplots()
+    ax.plot(fpr, tpr, label=f"AUC={roc_auc:.2f}")
+    ax.legend()
+    st.pyplot(fig)
+
+
+# =========================
+# FEATURE IMPORTANCE
+# =========================
+if os.path.exists("feat_imp.pkl"):
+    imp = joblib.load("feat_imp.pkl")
+
+    st.subheader("Feature Importance")
+    fig, ax = plt.subplots()
+    ax.bar(range(len(imp)), imp)
+    st.pyplot(fig)
