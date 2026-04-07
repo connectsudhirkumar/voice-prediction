@@ -9,13 +9,13 @@ import matplotlib.pyplot as plt
 import tempfile
 import seaborn as sns
 import noisereduce as nr
+import tensorflow as tf
 
 from extract import get_voice_features
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-
+from sklearn.metrics import confusion_matrix, roc_curve, auc
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
@@ -24,25 +24,21 @@ from sklearn.neighbors import KNeighborsClassifier
 plt.rcParams["figure.figsize"] = (5,3)
 
 st.set_page_config(layout="wide")
-st.title("🧠 Parkinson Detection (ML System)")
+st.title("🧠 Parkinson Detection (ML + CNN + LSTM Hybrid)")
 
 # =========================
-# SAFE AUDIO LOAD
+# AUDIO LOAD
 # =========================
 def safe_load_audio(path):
     try:
         if not os.path.exists(path) or os.path.getsize(path) < 1000:
             return None, None
-        y, sr = librosa.load(path, sr=22050)
-        if y is None or len(y) == 0:
-            return None, None
-        return y, sr
+        return librosa.load(path, sr=22050)
     except:
         return None, None
 
-
 # =========================
-# NOISE REDUCTION
+# CLEAN AUDIO
 # =========================
 def clean_audio(y, sr):
     try:
@@ -50,26 +46,95 @@ def clean_audio(y, sr):
     except:
         return y
 
+# =========================
+# AUGMENTATION
+# =========================
+def augment_audio(y, sr):
+    noise = np.random.randn(len(y))
+    y_noise = y + 0.005 * noise
+    y_pitch = librosa.effects.pitch_shift(y, sr=sr, n_steps=2)
+    return [y, y_noise, y_pitch]
 
 # =========================
-# DATASET
+# SPECTROGRAM SEQUENCE
 # =========================
-def create_dataset(folder="audio"):
-    data = []
-    for file in os.listdir(folder):
+def extract_spectrogram_sequence(y, sr):
+    spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+    spec = librosa.power_to_db(spec)
+    spec = spec.T
+
+    max_len = 128
+    if spec.shape[0] < max_len:
+        spec = np.pad(spec, ((0, max_len - spec.shape[0]), (0, 0)))
+    else:
+        spec = spec[:max_len]
+
+    # Normalize
+    spec = (spec - np.mean(spec)) / np.std(spec)
+
+    return spec
+
+# =========================
+# CNN + LSTM MODEL
+# =========================
+def build_cnn_lstm():
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(128,128)),
+        tf.keras.layers.Reshape((128,128,1)),
+
+        tf.keras.layers.Conv2D(32,(3,3),activation='relu'),
+        tf.keras.layers.MaxPooling2D(),
+
+        tf.keras.layers.Conv2D(64,(3,3),activation='relu'),
+        tf.keras.layers.MaxPooling2D(),
+
+        tf.keras.layers.Reshape((30, -1)),
+
+        tf.keras.layers.LSTM(64),
+
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dropout(0.3),
+
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+# =========================
+# ML TRAIN
+# =========================
+def train_ml(X_train, X_test, y_train, y_test):
+    models = {
+        "LR": LogisticRegression(max_iter=1000),
+        "RF": RandomForestClassifier(),
+        "SVM": SVC(probability=True)
+    }
+
+    best_model, best_score = None, 0
+    for m in models.values():
+        m.fit(X_train, y_train)
+        score = m.score(X_test, y_test)
+        if score > best_score:
+            best_score = score
+            best_model = m
+
+    return best_model
+
+# =========================
+# TRAIN ALL
+# =========================
+def train_all(progress):
+
+    # ===== ML =====
+    df = []
+    for file in os.listdir("audio"):
         if file.endswith(".wav"):
-            path = os.path.join(folder, file)
-
+            path = os.path.join("audio", file)
             y, sr = safe_load_audio(path)
-            if y is None:
-                continue
+            if y is None: continue
 
-            y = clean_audio(y, sr)
-
-            try:
-                features = get_voice_features(path)
-            except:
-                continue
+            features = get_voice_features(path)
 
             if "healthy" in file.lower():
                 features["status"] = 0
@@ -78,244 +143,134 @@ def create_dataset(folder="audio"):
             else:
                 continue
 
-            data.append(features)
+            df.append(features)
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(df)
 
-
-# =========================
-# TRAIN ML MODELS
-# =========================
-def train_ml_models(X_train, X_test, y_train, y_test):
-
-    models = {
-        "Logistic Regression": LogisticRegression(max_iter=1000),
-        "Random Forest": RandomForestClassifier(n_estimators=200),
-        "SVM": SVC(probability=True),
-        "KNN": KNeighborsClassifier()
-    }
-
-    best_model, best_name, best_score = None, "", 0
-
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        acc = model.score(X_test, y_test)
-
-        if acc > best_score:
-            best_score = acc
-            best_model = model
-            best_name = name
-
-    joblib.dump(best_model, "best_model.pkl")
-    joblib.dump(best_name, "best_model_name.pkl")
-
-    return best_model, best_name
-
-
-# =========================
-# TRAIN ALL
-# =========================
-def train_all(progress):
-
-    progress.progress(10, text="📂 Creating dataset...")
-    df = create_dataset()
-
-    if df.empty:
-        st.error("❌ No valid audio files")
-        return
-
-    X = df.drop("status", axis=1)
+    X = df.drop("status", axis=1).fillna(0)
     y = df["status"]
 
-    progress.progress(30, text="🔧 Preparing data...")
-    X.fillna(0, inplace=True)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y)
 
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
 
+    ml_model = train_ml(X_train, X_test, y_train, y_test)
+
+    joblib.dump(ml_model, "ml.pkl")
     joblib.dump(scaler, "scaler.pkl")
     joblib.dump(X.columns.tolist(), "cols.pkl")
 
-    progress.progress(50, text="🤖 Training ML models...")
-    model, model_name = train_ml_models(X_train, X_test, y_train, y_test)
+    # ===== DL =====
+    progress.progress(50, text="Training DL...")
 
-    y_pred = model.predict(X_test)
-    y_prob = model.predict_proba(X_test)[:,1]
+    X_dl, y_dl = [], []
 
-    joblib.dump(confusion_matrix(y_test, y_pred), "cm.pkl")
-    joblib.dump(classification_report(y_test, y_pred, output_dict=True), "report.pkl")
+    for file in os.listdir("audio"):
+        if file.endswith(".wav"):
+            path = os.path.join("audio", file)
+            y_audio, sr = safe_load_audio(path)
+            if y_audio is None: continue
 
-    fpr, tpr, _ = roc_curve(y_test, y_prob)
-    joblib.dump((fpr, tpr, auc(fpr,tpr)), "roc.pkl")
+            for aug in augment_audio(y_audio, sr):
+                spec = extract_spectrogram_sequence(aug, sr)
+                X_dl.append(spec)
 
-    if hasattr(model, "feature_importances_"):
-        joblib.dump(model.feature_importances_, "feat_imp.pkl")
+                if "healthy" in file.lower():
+                    y_dl.append(0)
+                else:
+                    y_dl.append(1)
 
-    st.success(f"🏆 Best Model: {model_name}")
+    X_dl = np.array(X_dl)
+    y_dl = np.array(y_dl)
 
-    progress.progress(100, text="✅ Training Complete")
+    model = build_cnn_lstm()
 
+    history = model.fit(
+        X_dl, y_dl,
+        epochs=10,
+        batch_size=8,
+        validation_split=0.2,
+        callbacks=[tf.keras.callbacks.EarlyStopping(patience=3)],
+        verbose=0
+    )
+
+    model.save("dl_model.h5")
+    joblib.dump(history.history, "history.pkl")
+
+    progress.progress(100, text="Done")
 
 # =========================
-# TRAIN BUTTON
+# UI
 # =========================
 st.header("🚀 Training")
-
-if st.button("Train Model"):
+if st.button("Train"):
     progress = st.progress(0)
     train_all(progress)
 
-
 # =========================
-# LOAD MODELS
+# LOAD
 # =========================
-if not os.path.exists("best_model.pkl"):
-    st.warning("⚠️ Train model first")
+if not os.path.exists("ml.pkl"):
     st.stop()
 
-ml_model = joblib.load("best_model.pkl")
-model_name = joblib.load("best_model_name.pkl")
+ml_model = joblib.load("ml.pkl")
 scaler = joblib.load("scaler.pkl")
 cols = joblib.load("cols.pkl")
 
-
-# =========================
-# INPUT
-# =========================
-st.header("🎤 Upload Audio")
-
-file = st.file_uploader("Upload WAV File", type=["wav"])
-
-audio_bytes = None
-if file:
-    audio_bytes = file.read()
-
+dl_model = None
+if os.path.exists("dl_model.h5"):
+    dl_model = tf.keras.models.load_model("dl_model.h5")
 
 # =========================
 # PREDICTION
 # =========================
-if audio_bytes:
+file = st.file_uploader("Upload WAV", type=["wav"])
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-        f.write(audio_bytes)
-        path = f.name
+if file:
+    path = tempfile.mktemp(suffix=".wav")
+    with open(path, "wb") as f:
+        f.write(file.read())
 
-    progress = st.progress(0)
-
-    progress.progress(10, text="📂 Loading audio...")
     y, sr = safe_load_audio(path)
 
-    if y is None:
-        st.error("Invalid audio")
-        st.stop()
-
-    y = clean_audio(y, sr)
-
-    progress.progress(30, text="🔍 Extracting features...")
-    features = get_voice_features(path)
-    df = pd.DataFrame([features]).reindex(columns=cols, fill_value=0)
-
-    progress.progress(60, text="🤖 ML prediction...")
+    # ML
+    feat = get_voice_features(path)
+    df = pd.DataFrame([feat]).reindex(columns=cols, fill_value=0)
     ml_prob = ml_model.predict_proba(scaler.transform(df))[0][1]
 
-    progress.progress(100, text="✅ Done")
+    # DL
+    spec = extract_spectrogram_sequence(y, sr)
+    spec = np.expand_dims(spec, axis=0)
+    dl_prob = dl_model.predict(spec)[0][0]
 
-    st.subheader("🧾 Prediction Result")
-    label = "Parkinson ❌" if ml_prob > 0.5 else "Healthy ✅"
+    # Final
+    final_prob = 0.4*ml_prob + 0.6*dl_prob
 
-    st.success(f"Prediction: {label}")
-    st.info(f"🤖 Model Used: {model_name}")
-    st.metric("ML Confidence Score", f"{ml_prob*100:.2f}%")
-
-    st.markdown("---")
-    st.subheader("📊 Voice Analysis Visualizations")
-
-    colA, colB = st.columns(2)
-
-    # 🎵 Waveform
-    with colA:
-        st.subheader("🎵 Raw Audio Waveform")
-        st.caption("Shows how the voice signal amplitude changes over time")
-
-        fig, ax = plt.subplots()
-        librosa.display.waveshow(y, sr=sr, ax=ax)
-        ax.set_title("Waveform")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Amplitude")
-        st.pyplot(fig)
-
-    # 🌈 Spectrogram
-    with colB:
-        st.subheader("🌈 Mel Spectrogram")
-        st.caption("Shows frequency distribution over time to detect voice irregularities")
-
-        spec = librosa.feature.melspectrogram(y=y, sr=sr)
-        spec = librosa.power_to_db(spec)
-
-        fig, ax = plt.subplots()
-        librosa.display.specshow(spec, sr=sr, ax=ax)
-        ax.set_title("Mel Spectrogram")
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Frequency")
-        st.pyplot(fig)
-
+    st.subheader("Results")
+    st.write("ML:", ml_prob)
+    st.write("DL:", dl_prob)
+    st.write("Final:", final_prob)
 
 # =========================
-# CONFUSION MATRIX
+# TRAINING GRAPH
 # =========================
-if os.path.exists("cm.pkl"):
-    cm = joblib.load("cm.pkl")
+if os.path.exists("history.pkl"):
+    hist = joblib.load("history.pkl")
 
-    st.subheader("🔲 Confusion Matrix")
-    st.caption("Shows correct vs incorrect predictions (Healthy vs Parkinson)")
+    st.subheader("📈 Training Performance")
 
     fig, ax = plt.subplots()
-    sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", ax=ax)
-
-    ax.set_xlabel("Predicted Label")
-    ax.set_ylabel("True Label")
-    ax.set_title("Confusion Matrix")
-
-    st.pyplot(fig)
-
-
-# =========================
-# ROC CURVE
-# =========================
-if os.path.exists("roc.pkl"):
-    fpr, tpr, roc_auc = joblib.load("roc.pkl")
-
-    st.subheader("📈 ROC Curve")
-    st.caption("Shows model performance in distinguishing Healthy vs Parkinson")
-
-    fig, ax = plt.subplots()
-    ax.plot(fpr, tpr, label=f"AUC={roc_auc:.2f}")
-
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.set_title("ROC Curve")
-
+    ax.plot(hist["loss"], label="Loss")
+    ax.plot(hist["val_loss"], label="Val Loss")
+    ax.set_title("Training Loss")
     ax.legend()
     st.pyplot(fig)
 
-
-# =========================
-# FEATURE IMPORTANCE
-# =========================
-if os.path.exists("feat_imp.pkl"):
-    imp = joblib.load("feat_imp.pkl")
-
-    st.subheader("📊 Feature Importance")
-    st.caption("Shows which voice features contribute most to prediction")
-
     fig, ax = plt.subplots()
-    ax.bar(range(len(imp)), imp)
-
-    ax.set_title("Feature Importance")
-    ax.set_xlabel("Feature Index")
-    ax.set_ylabel("Importance Score")
-
+    ax.plot(hist["accuracy"], label="Accuracy")
+    ax.plot(hist["val_accuracy"], label="Val Accuracy")
+    ax.set_title("Training Accuracy")
+    ax.legend()
     st.pyplot(fig)
