@@ -183,7 +183,7 @@ cols = joblib.load("cols.pkl")
 
 
 # =========================
-# INPUT (UPLOAD ONLY)
+# INPUT
 # =========================
 st.header("🎤 Upload Audio")
 
@@ -223,27 +223,43 @@ if audio_bytes:
 
     progress.progress(100, text="✅ Done")
 
-    st.subheader("🧾 Result")
+    st.subheader("🧾 Prediction Result")
     label = "Parkinson ❌" if ml_prob > 0.5 else "Healthy ✅"
 
     st.success(f"Prediction: {label}")
     st.info(f"🤖 Model Used: {model_name}")
+    st.metric("ML Confidence Score", f"{ml_prob*100:.2f}%")
 
-    st.metric("ML Score", f"{ml_prob*100:.2f}%")
+    st.markdown("---")
+    st.subheader("📊 Voice Analysis Visualizations")
 
     colA, colB = st.columns(2)
 
+    # 🎵 Waveform
     with colA:
+        st.subheader("🎵 Raw Audio Waveform")
+        st.caption("Shows how the voice signal amplitude changes over time")
+
         fig, ax = plt.subplots()
         librosa.display.waveshow(y, sr=sr, ax=ax)
+        ax.set_title("Waveform")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Amplitude")
         st.pyplot(fig)
 
+    # 🌈 Spectrogram
     with colB:
+        st.subheader("🌈 Mel Spectrogram")
+        st.caption("Shows frequency distribution over time to detect voice irregularities")
+
         spec = librosa.feature.melspectrogram(y=y, sr=sr)
         spec = librosa.power_to_db(spec)
 
         fig, ax = plt.subplots()
         librosa.display.specshow(spec, sr=sr, ax=ax)
+        ax.set_title("Mel Spectrogram")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Frequency")
         st.pyplot(fig)
 
 
@@ -253,8 +269,16 @@ if audio_bytes:
 if os.path.exists("cm.pkl"):
     cm = joblib.load("cm.pkl")
 
+    st.subheader("🔲 Confusion Matrix")
+    st.caption("Shows correct vs incorrect predictions (Healthy vs Parkinson)")
+
     fig, ax = plt.subplots()
     sns.heatmap(cm, annot=True, fmt='d', cmap="Blues", ax=ax)
+
+    ax.set_xlabel("Predicted Label")
+    ax.set_ylabel("True Label")
+    ax.set_title("Confusion Matrix")
+
     st.pyplot(fig)
 
 
@@ -264,9 +288,16 @@ if os.path.exists("cm.pkl"):
 if os.path.exists("roc.pkl"):
     fpr, tpr, roc_auc = joblib.load("roc.pkl")
 
-    st.subheader("ROC Curve")
+    st.subheader("📈 ROC Curve")
+    st.caption("Shows model performance in distinguishing Healthy vs Parkinson")
+
     fig, ax = plt.subplots()
     ax.plot(fpr, tpr, label=f"AUC={roc_auc:.2f}")
+
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve")
+
     ax.legend()
     st.pyplot(fig)
 
@@ -277,7 +308,14 @@ if os.path.exists("roc.pkl"):
 if os.path.exists("feat_imp.pkl"):
     imp = joblib.load("feat_imp.pkl")
 
-    st.subheader("Feature Importance")
+    st.subheader("📊 Feature Importance")
+    st.caption("Shows which voice features contribute most to prediction")
+
     fig, ax = plt.subplots()
     ax.bar(range(len(imp)), imp)
+
+    ax.set_title("Feature Importance")
+    ax.set_xlabel("Feature Index")
+    ax.set_ylabel("Importance Score")
+
     st.pyplot(fig)
