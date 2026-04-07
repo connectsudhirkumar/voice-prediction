@@ -9,3 +9,4 @@ noisereduce
 scikit-learn
 scipy
 praat-parselmouth
+tensorflow
